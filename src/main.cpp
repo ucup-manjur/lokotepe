@@ -41,7 +41,7 @@ class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
                 Serial.println("--- DATA TPMS TERDETEKSI ---");
                 Serial.printf("Raw bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n", data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10]);
                 Serial.printf("Status  : %s\n", statusStr.c_str());
-                Serial.printf("Voltage : %.2f\n", voltage);
+                Serial.printf("Voltage : %.2f\n", voltage); if (voltage < 2.5) {Serial.println("Warning: Ganti Baterai Sensor!");}
                 Serial.printf("Suhu    : %d °C\n", celcius);
                 Serial.printf("Tekanan : %.1f KPa\n", kpa);
                 Serial.printf("Tekanan : %.1f PSI\n", psi);
