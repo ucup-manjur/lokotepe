@@ -1,71 +1,208 @@
 #include <Arduino.h>
-
 #include <NimBLEDevice.h>
 
-// Ganti dengan MAC Address sensor kamu (lihat di nRF Connect)
-// Contoh: "B9:41:FA:00:04:D0"
-std::string targetDeviceAddress = "b9:41:fa:00:04:d0"; 
+// --- 4 slot sensor (FL, FR, RL, RR) ---
+const char* tireLabels[] = {"Front Left", "Front Right", "Rear Left", "Rear Right"};
+std::string pairedMacs[4] = {"", "", "", ""}; // kosong sampai di-pair
 
-class MyAdvertisedDeviceCallbacks: public NimBLEAdvertisedDeviceCallbacks {
+// --- SCAN TPMS ---
+struct ScannedDevice {
+    std::string mac;
+    int rssi;
+};
+std::vector<ScannedDevice> scannedTpms;
+bool scanTpmsMode = false;
+bool scanTpmsDone = false;
+
+void onScanDone(NimBLEScanResults results) {
+    scanTpmsMode = false;
+    scanTpmsDone = true;
+}
+
+// Cari index ban dari MAC, return -1 kalau tidak ditemukan
+int findTireIndex(const std::string& addr) {
+    for (int i = 0; i < 4; i++) {
+        if (!pairedMacs[i].empty() && pairedMacs[i] == addr) return i;
+    }
+    return -1;
+}
+
+// Cek apakah MAC sudah terdaftar di salah satu slot
+bool isAlreadyPaired(const std::string& addr) {
+    return findTireIndex(addr) != -1;
+}
+
+class MyAdvertisedDeviceCallbacks : public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice* advertisedDevice) {
-        // Cek apakah MAC Address cocok
-        if (advertisedDevice->getAddress().toString() == targetDeviceAddress) {
-            
-            // Ambil data Manufacturer
-            std::string strManufacturerData = advertisedDevice->getManufacturerData();
-            
-            if (strManufacturerData.length() >= 11) {
-                uint8_t* data = (uint8_t*)strManufacturerData.data();
+        // Filter hanya device dengan Service UUID 0xA827
+        if (!advertisedDevice->isAdvertisingService(NimBLEUUID((uint16_t)0xA827))) return;
 
-                // 1. Ambil Status (Byte 0-1)
-                uint16_t status = (data[0] << 8) | data[1];
-                String statusStr = (status == 0x0600) ? "PERINGATAN!" : "Normal";
+        std::string addr = advertisedDevice->getAddress().toString();
 
-
-                uint16_t volt = data[2];
-                float voltage = (volt / 60.0f);
-
-                // 2. Dekode Suhu (Byte 3)
-                // Rumus: Nilai Desimal - 50
-                int celcius = data[3] - 50;
-
-                // 3. Dekode Tekanan (Byte 4-5)
-                // Gabungin dua byte jadi satu angka desimal (KPa Absolut)
-                uint16_t kpaAbsolut = (data[4] << 8) | data[5];
-                
-                // Rumus: (KPa Absolut - Tekanan Atmosfer) * Konversi PSI
-                float kpa = (kpaAbsolut - 101.3);
-                float psi = ((kpaAbsolut - 101.3) * 0.145 ) + 0.2;
-
-                // 4. Print ke Serial Monitor
-                Serial.println("--- DATA TPMS TERDETEKSI ---");
-                Serial.printf("Raw bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n", data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10]);
-                Serial.printf("Status  : %s\n", statusStr.c_str());
-                Serial.printf("Voltage : %.2f\n", voltage); if (voltage < 2.5) {Serial.println("Warning: Ganti Baterai Sensor!");}
-                Serial.printf("Suhu    : %d °C\n", celcius);
-                Serial.printf("Tekanan : %.1f KPa\n", kpa);
-                Serial.printf("Tekanan : %.1f PSI\n", psi);
-                Serial.printf("RSSI    : %d dBm\n", advertisedDevice->getRSSI());
-                Serial.println("----------------------------\n");
+        // --- MODE SCAN TPMS ---
+        if (scanTpmsMode) {
+            if (isAlreadyPaired(addr)) return; // skip yang sudah terdaftar
+            for (auto& d : scannedTpms) {
+                if (d.mac == addr) return; // skip duplikat
             }
+            scannedTpms.push_back({addr, advertisedDevice->getRSSI()});
+            Serial.printf("[SCAN] %s  RSSI: %d dBm\n", addr.c_str(), advertisedDevice->getRSSI());
+            return;
         }
+
+        // --- MODE MONITORING ---
+        int idx = findTireIndex(addr);
+        if (idx == -1) return;
+
+        std::string mfr = advertisedDevice->getManufacturerData();
+        if (mfr.length() < 11) return;
+
+        uint8_t* data = (uint8_t*)mfr.data();
+
+        uint16_t status = ((uint16_t)data[0] << 8) | data[1];
+        String statusStr = (status == 0x0600) ? "PERINGATAN!" : "Normal";
+
+        float voltage  = (data[2] / 60.0f);
+        int   celcius  = data[3] - 50;
+
+        uint16_t kpaAbsolut = ((uint16_t)data[4] << 8) | data[5];
+        float kpa = (kpaAbsolut - 101.3f);
+        float psi = ((kpaAbsolut - 101.3f) * 0.145f) + 0.2f;
+
+        Serial.printf("\n=== [%s] ===\n", tireLabels[idx]);
+        Serial.printf("Status  : %s\n", statusStr.c_str());
+        Serial.printf("Voltage : %.2f V\n", voltage);
+        if (voltage < 2.5f) Serial.println("Warning: Ganti Baterai Sensor!");
+        Serial.printf("Suhu    : %d °C\n", celcius);
+        Serial.printf("Tekanan : %.1f KPa\n", kpa);
+        Serial.printf("Tekanan : %.1f PSI\n", psi);
+        Serial.printf("RSSI    : %d dBm\n", advertisedDevice->getRSSI());
+        Serial.println("----------------------------");
     }
 };
+
+void handleSerial() {
+    if (!Serial.available()) return;
+
+    String input = Serial.readStringUntil('\n');
+    input.trim();
+    input.toLowerCase();
+
+    // --- scan_tpms ---
+    if (input == "scan_tpms") {
+        scannedTpms.clear();
+        scanTpmsMode = true;
+        scanTpmsDone = false;
+        Serial.println("\n[INFO] Scanning TPMS 30 detik...");
+        NimBLEDevice::getScan()->stop();
+        NimBLEDevice::getScan()->start(30, onScanDone, false);
+        return;
+    }
+
+    // --- p-fl/fr/rl/rr <MAC> ---
+    if (input.startsWith("p-")) {
+        int spaceIdx = input.indexOf(' ');
+        if (spaceIdx == -1) {
+            Serial.println("[ERROR] Format: p-fl <MAC>");
+            return;
+        }
+        String pos = input.substring(2, spaceIdx);
+        String mac = input.substring(spaceIdx + 1);
+        mac.trim();
+
+        if (mac.length() != 17) {
+            Serial.println("[ERROR] Format MAC tidak valid. Contoh: b9:41:fa:00:04:d0");
+            return;
+        }
+
+        int idx = -1;
+        if      (pos == "fl") idx = 0;
+        else if (pos == "fr") idx = 1;
+        else if (pos == "rl") idx = 2;
+        else if (pos == "rr") idx = 3;
+
+        if (idx == -1) {
+            Serial.println("[ERROR] Posisi tidak valid. Gunakan: fl/fr/rl/rr");
+            return;
+        }
+
+        if (!pairedMacs[idx].empty()) {
+            Serial.printf("[ERROR] %s sudah dipasangkan ke: %s. Ketik 'unpair-%s' dulu.\n",
+                tireLabels[idx], pairedMacs[idx].c_str(), pos.c_str());
+            return;
+        }
+
+        pairedMacs[idx] = std::string(mac.c_str());
+        Serial.printf("[OK] %s dipasangkan ke: %s\n", tireLabels[idx], pairedMacs[idx].c_str());
+        return;
+    }
+
+    // --- unpair-fl/fr/rl/rr ---
+    if (input.startsWith("unpair-")) {
+        String pos = input.substring(7);
+        int idx = -1;
+        if      (pos == "fl") idx = 0;
+        else if (pos == "fr") idx = 1;
+        else if (pos == "rl") idx = 2;
+        else if (pos == "rr") idx = 3;
+
+        if (idx == -1) {
+            Serial.println("[ERROR] Posisi tidak valid. Gunakan: fl/fr/rl/rr");
+            return;
+        }
+        if (pairedMacs[idx].empty()) {
+            Serial.printf("[ERROR] %s belum dipasangkan.\n", tireLabels[idx]);
+            return;
+        }
+        pairedMacs[idx] = "";
+        Serial.printf("[OK] %s berhasil di-unpair.\n", tireLabels[idx]);
+        return;
+    }
+
+    // --- status ---
+    if (input == "status") {
+        Serial.println("\n[STATUS] Sensor terdaftar:");
+        for (int i = 0; i < 4; i++) {
+            Serial.printf("  %s: %s\n", tireLabels[i],
+                pairedMacs[i].empty() ? "(belum dipasang)" : pairedMacs[i].c_str());
+        }
+        return;
+    }
+
+    Serial.println("[ERROR] Perintah: scan_tpms | p-fl/fr/rl/rr <MAC> | status");
+}
 
 void setup() {
     Serial.begin(115200);
     Serial.println("Memulai Scanner TPMS...");
+    Serial.println("1. Ketik 'scan_tpms' untuk mencari sensor.");
+    Serial.println("2. Ketik 'p-fl/fr/rl/rr <MAC>' untuk pair sensor ke posisi ban.");
+    Serial.println("3. Ketik 'status' untuk lihat sensor terdaftar.\n");
 
     NimBLEDevice::init("");
-    NimBLEScan* pNimBLEScan = NimBLEDevice::getScan();
-    
-    pNimBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), false);
-    pNimBLEScan->setActiveScan(true); // Biar dapet data lebih akurat
-    pNimBLEScan->setInterval(100);
-    pNimBLEScan->setWindow(99);
+    NimBLEScan* pScan = NimBLEDevice::getScan();
+    pScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks(), false);
+    pScan->setActiveScan(true);
+    pScan->setInterval(100);
+    pScan->setWindow(99);
+    pScan->setDuplicateFilter(false);
+    pScan->start(0, nullptr, false);
 }
 
 void loop() {
-    // Scan selama 5 detik, lalu ulangi
-    NimBLEDevice::getScan()->start(5, false);
+    handleSerial();
+
+    if (scanTpmsDone) {
+        scanTpmsDone = false;
+        if (scannedTpms.empty()) {
+            Serial.println("[INFO] Tidak ada sensor TPMS baru ditemukan.");
+        } else {
+            Serial.printf("\n[HASIL] %d sensor TPMS ditemukan:\n", scannedTpms.size());
+            for (auto& d : scannedTpms) {
+                Serial.printf("  %s  RSSI: %d dBm\n", d.mac.c_str(), d.rssi);
+            }
+            Serial.println("Gunakan: p-fl/fr/rl/rr <MAC>");
+        }
+        NimBLEDevice::getScan()->start(0, nullptr, false);
+    }
 }
