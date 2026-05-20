@@ -5,7 +5,7 @@
 Preferences preferences;
 
 // --- KONFIGURASI SENSOR ---
-#define MAX_SENSORS 16  // Ubah ke 16 jika mau 16 sensor
+#define MAX_SENSORS 8  // Ubah ke 16 jika mau 16 sensor
 
 const char* tireLabels[] = {
     "Front Left", "Front Left-2", 
@@ -33,6 +33,7 @@ TireData tireData[16] = {};
 unsigned long lastPrintTime = 0;
 #define PRINT_INTERVAL_MS 10000  // 10 detik
 unsigned long lastClearTime = 0;
+unsigned long lastHeapLog = 0;
 
 // --- SCAN TPMS ---
 struct ScannedDevice {
@@ -338,10 +339,20 @@ void loop() {
         NimBLEDevice::getScan()->clearResults();
         Serial.println("[INFO] Cache scan dibersihkan.");
     }
+    
+    // Monitor heap setiap 5 menit
+    if (now - lastHeapLog >= 60000) {
+        lastHeapLog = now;
+        Serial.printf("[HEAP] Free: %d | Min ever: %d\n",
+            ESP.getFreeHeap(),
+            ESP.getMinFreeHeap());
+    }
 
     if (now - lastPrintTime >= PRINT_INTERVAL_MS) {
         lastPrintTime = now;
+        unsigned long t = millis();
         printAllTires();
+        Serial.printf("[DEBUG] Print took %lums\n", millis() - t);
     }
 
     if (scanTpmsDone) {
